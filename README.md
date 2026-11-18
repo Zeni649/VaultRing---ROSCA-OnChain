@@ -17,7 +17,7 @@ Demo ứng dụng hụi (ROSCA) phi tập trung cho 4 người chơi trên Avala
 
 ### 1. Install
 ```bash
-cd huionchain-main
+cd VaultRing
 pip install -r requirements.txt
 ```
 
@@ -64,11 +64,11 @@ export FUJI_RPC="https://api.avax-test.network/ext/bc/C/rpc"
 export PRIVATE_KEY="0x..."
 
 # Deploy MockUSDC + Factory
-forge script contracts/script/Deploy.s.sol:DeployMockUSDC \
+forge script contracts/script/Deploy.s.sol \
   --rpc-url $FUJI_RPC --broadcast
 
-# Deploy MockYieldAdapter (0.5% mock yield)
-forge script contracts/script/DeployMockYieldAdapter.s.sol \
+# Deploy YieldAdapter (Aave v3)
+forge script contracts/script/DeployYieldAdapter.s.sol \
   --rpc-url $FUJI_RPC --broadcast
 ```
 
@@ -144,49 +144,68 @@ Mở: http://localhost:8501
 7. **Bidding** → commit/reveal/settle (4 vòng)
 8. **Close** → yield chia đều
 
-Chi tiết: [DEMO_CHECKLIST.md](DEMO_CHECKLIST.md)
+Chi tiết: [DEMO_SCRIPT_AND_GUIDE.md](DEMO_SCRIPT_AND_GUIDE.md)
 
 ---
 
 ## Project Structure
 
 ```
-huionchain-main/
+VaultRing/
 ├── contracts/              # Solidity contracts (Foundry)
 │   ├── src/
 │   │   ├── RoscaCircle.sol           # Core ROSCA logic
 │   │   ├── RoscaFactory.sol          # Circle factory
 │   │   ├── YieldAdapter.sol          # Aave v3 adapter
-│   │   └── MockYieldAdapter.sol      # Mock 0.5% yield
+│   │   ├── MockYieldAdapter.sol      # Mock 0.5% yield
+│   │   └── MockUSDC.sol              # Test USDC token
 │   ├── script/
-│   │   ├── Deploy.s.sol              # Deploy scripts
-│   │   ├── DeployYieldAdapter.s.sol
-│   │   └── DeployMockYieldAdapter.s.sol
-│   └── test/
+│   │   ├── Deploy.s.sol              # Deploy MockUSDC + Factory
+│   │   └── DeployYieldAdapter.s.sol  # Deploy Aave adapter
+│   ├── test/
+│   │   └── Rosca.t.sol               # Contract tests
+│   ├── foundry.toml
+│   └── remappings.txt
 │
-├── app/                    # Streamlit frontend
-│   ├── main.py                       # Main UI (1010 lines)
+├── app/                    # Streamlit frontend + backend
+│   ├── main.py                       # Main UI (Streamlit)
 │   ├── chain.py                      # Web3 read functions
 │   ├── wallet.py                     # Web3 write functions
-│   ├── contract_abi.py               # ABIs
-│   ├── yield_backend.py              # Part 2 backend
-│   └── edu_kyc_backend.py            # Part 4 backend
+│   ├── contract_abi.py               # Contract ABIs
+│   ├── yield_backend.py              # Part 2: Yield management
+│   ├── edu_kyc_backend.py            # Part 4: KYC backend
+│   ├── agent_bridge.py               # AI agent integration
+│   ├── test_logic.py                 # Unit tests
+│   └── __init__.py
 │
 ├── ai/                     # AI agent + credit scoring
 │   ├── agent.py                      # Chatbot logic
 │   ├── credit_score.py               # Scoring algorithm
-│   └── tools.py                      # Agent tools
+│   ├── llm.py                        # LLM API wrapper
+│   ├── tools.py                      # Agent tools
+│   └── test_agent.py                 # Agent tests
 │
-├── demo_config.py          # Demo constants
-├── demo_run.py             # CLI demo runner
-├── demo_wallets.json       # Demo wallets
+├── sim/                    # Simulation & fuzzing
+│   ├── rosca_model.py                # ROSCA model
+│   ├── contract_port.py              # Contract logic port
+│   ├── test_contract_port.py         # Port tests
+│   ├── test_fuzz.py                  # Fuzzing tests
+│   └── __init__.py
+│
+├── .streamlit/             # Streamlit config (theme, settings)
+├── demo_config.py          # Demo constants (windows, contribution, etc.)
+├── demo_run.py             # CLI demo runner (4-player ROSCA on Fuji)
+├── demo_wallets.json       # Demo wallet credentials (private keys — KHÔNG commit)
+├── setup_all.py            # Setup automation script
 ├── requirements.txt        # Python dependencies
 │
-└── docs/
-    ├── IMPLEMENTATION_STATUS.md      # Progress tracker
-    ├── PART2_IMPLEMENTATION.md       # Part 2 details
-    ├── PART4_IMPLEMENTATION.md       # Part 4 details
-    └── DEMO_CHECKLIST.md             # Test checklist
+├── docs/
+│   └── Pitch Pack & Legal.md         # Legal compliance notes
+│
+├── DEMO_SCRIPT_AND_GUIDE.md          # Demo script for video recording
+├── SYSTEM_FLOW.md                    # Detailed system architecture
+├── README.md                         # This file
+└── .gitignore
 ```
 
 ---
@@ -215,6 +234,8 @@ huionchain-main/
 
 ---
 
+## Troubleshooting
+
 ### "Module not found"
 ```bash
 pip install -r requirements.txt
@@ -236,7 +257,7 @@ cast send $USDC "mint(address,uint256)" $WALLET 100000000 \
 ### "Commit window expired"
 Windows ngắn (300s), phải commit ngay sau join.
 
-Xem thêm: [DEMO_CHECKLIST.md](DEMO_CHECKLIST.md) (section "Troubleshooting")
+Xem thêm: [DEMO_SCRIPT_AND_GUIDE.md](DEMO_SCRIPT_AND_GUIDE.md)
 
 ---
 

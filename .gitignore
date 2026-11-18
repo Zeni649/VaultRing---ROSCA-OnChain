@@ -7,3 +7,4 @@ venv/
 contracts/out/
 contracts/cache/
 contracts/broadcast/
+demo_wallets.json
