@@ -105,34 +105,34 @@ ROSCA_CIRCLE_ABI = [
     {"name":"withdrawFromAdapter","type":"function","stateMutability":"nonpayable",
      "inputs":[],"outputs":[]},
     # events
-    {"name":"YieldAccrued","type":"event","inputs":[
+    {"name":"YieldAccrued","type":"event","anonymous":False,"inputs":[
         {"name":"amount","type":"uint256","indexed":False}]},
-    {"name":"Joined","type":"event","inputs":[
+    {"name":"Joined","type":"event","anonymous":False,"inputs":[
         {"name":"member","type":"address","indexed":True},
         {"name":"index","type":"uint16","indexed":False}]},
-    {"name":"PaidIn","type":"event","inputs":[
+    {"name":"PaidIn","type":"event","anonymous":False,"inputs":[
         {"name":"member","type":"address","indexed":True},
         {"name":"roundIdx","type":"uint16","indexed":True},
         {"name":"due","type":"uint256","indexed":False},
         {"name":"fee","type":"uint256","indexed":False}]},
-    {"name":"BidCommitted","type":"event","inputs":[
+    {"name":"BidCommitted","type":"event","anonymous":False,"inputs":[
         {"name":"member","type":"address","indexed":True},
         {"name":"roundIdx","type":"uint16","indexed":True},
         {"name":"h","type":"bytes32","indexed":False}]},
-    {"name":"BidRevealed","type":"event","inputs":[
+    {"name":"BidRevealed","type":"event","anonymous":False,"inputs":[
         {"name":"member","type":"address","indexed":True},
         {"name":"roundIdx","type":"uint16","indexed":True},
         {"name":"bid","type":"uint256","indexed":False}]},
-    {"name":"CircleSettled","type":"event","inputs":[
+    {"name":"CircleSettled","type":"event","anonymous":False,"inputs":[
         {"name":"roundIdx","type":"uint16","indexed":True},
         {"name":"receiver","type":"address","indexed":True},
         {"name":"bid","type":"uint256","indexed":False},
         {"name":"pot","type":"uint256","indexed":False}]},
-    {"name":"Payout","type":"event","inputs":[
+    {"name":"Payout","type":"event","anonymous":False,"inputs":[
         {"name":"receiver","type":"address","indexed":True},
         {"name":"roundIdx","type":"uint16","indexed":True},
         {"name":"pot","type":"uint256","indexed":False}]},
-    {"name":"MemberDefaulted","type":"event","inputs":[
+    {"name":"MemberDefaulted","type":"event","anonymous":False,"inputs":[
         {"name":"member","type":"address","indexed":True},
         {"name":"roundIdx","type":"uint16","indexed":True},
         {"name":"covered","type":"uint256","indexed":False},
@@ -156,7 +156,7 @@ ROSCA_FACTORY_ABI = [
      "inputs":[],"outputs":[{"type":"uint256"}]},
     {"name":"isCircle","type":"function","stateMutability":"view",
      "inputs":[{"type":"address"}],"outputs":[{"type":"bool"}]},
-    {"name":"CircleCreated","type":"event","inputs":[
+    {"name":"CircleCreated","type":"event","anonymous":False,"inputs":[
         {"name":"circle","type":"address","indexed":True},
         {"name":"organizer","type":"address","indexed":True},
         {"name":"mode","type":"uint8","indexed":False},
@@ -169,6 +169,9 @@ ERC20_ABI = [
     {"name":"approve","type":"function","stateMutability":"nonpayable",
      "inputs":[{"name":"spender","type":"address"},
                {"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]},
+    {"name":"transfer","type":"function","stateMutability":"nonpayable",
+     "inputs":[{"name":"to","type":"address"},
+               {"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]},
     {"name":"allowance","type":"function","stateMutability":"view",
      "inputs":[{"name":"owner","type":"address"},
                {"name":"spender","type":"address"}],"outputs":[{"type":"uint256"}]},
@@ -176,6 +179,10 @@ ERC20_ABI = [
      "inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
     {"name":"decimals","type":"function","stateMutability":"view",
      "inputs":[],"outputs":[{"type":"uint8"}]},
+    {"name":"Transfer","type":"event","anonymous":False,"inputs":[
+        {"name":"from","type":"address","indexed":True},
+        {"name":"to","type":"address","indexed":True},
+        {"name":"value","type":"uint256","indexed":False}]},
 ]
 
 YIELD_ADAPTER_ABI = [
@@ -195,9 +202,9 @@ YIELD_ADAPTER_ABI = [
      "inputs":[],"outputs":[{"type":"address"}]},
     {"name":"ROSCA","type":"function","stateMutability":"view",
      "inputs":[],"outputs":[{"type":"address"}]},
-    {"name":"SuppliedToAave","type":"event",
+    {"name":"SuppliedToAave","type":"event","anonymous":False,
      "inputs":[{"name":"amount","type":"uint256","indexed":False}]},
-    {"name":"WithdrewFromAave","type":"event",
+    {"name":"WithdrewFromAave","type":"event","anonymous":False,
      "inputs":[{"name":"usdcReceived","type":"uint256","indexed":False},
                {"name":"yieldEarned","type":"uint256","indexed":False}]},
 ]

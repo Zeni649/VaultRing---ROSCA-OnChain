@@ -11,15 +11,31 @@ test được mà không cần Streamlit.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import os
+import sys
 import time
+from pathlib import Path
+
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 import streamlit as st
+
+import app.contract_abi as _abi_mod
+import app.chain as _chain_mod
+import app.wallet as _wallet_mod
+import app.agent_bridge as _ab_mod
+importlib.reload(_abi_mod)
+importlib.reload(_chain_mod)
+importlib.reload(_wallet_mod)
+importlib.reload(_ab_mod)
 
 from app.chain import (
     FUJI_CHAIN_ID, FUJI_RPC, FUJI_EXPLORER, MODE_NAMES, PHASE_NAMES,
     USDC_FUJI, fmt_usdc, read_circle, read_history, read_members, read_rounds,
-    etherscan_link
+    etherscan_link, get_active_circle, set_active_circle, chain_timestamp
 )
 from app.wallet import (
     load_players, balances, create_circle, join, pay_in,
@@ -28,23 +44,28 @@ from app.wallet import (
 from app.yield_backend import supply_to_aave, withdraw_and_report, get_ausdc_balance
 from app.contract_abi import ROSCA_CIRCLE_ABI
 from ai.credit_score import History, score
-from app.agent_bridge import build_agent_context
+from app.agent_bridge import (
+    build_agent_context, _history_for, set_simulated_prior, get_simulated_prior
+)
 from ai import agent as _agent
 from ai.tools import defi_pools, bid_advice
 
-st.set_page_config(page_title="Hụi On-Chain", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="VaultRing", page_icon="🪙", layout="wide")
 
 CURRENT_PLAYER_KEY = "current_player"
 CIRCLE_ADDRESS_KEY = "circle_address"
 
 
 def _w3():
-    """Kết nối Web3. Trả None nếu chưa cài web3."""
+    """Kết nối Web3 (có retry khi RPC bị giới hạn tốc độ). None nếu chưa cài web3."""
     try:
+        import app.chain as _chain_mod
+        if hasattr(_chain_mod, "make_w3"):
+            return _chain_mod.make_w3()
         from web3 import Web3
+        return Web3(Web3.HTTPProvider(FUJI_RPC))
     except ImportError:
         return None
-    return Web3(Web3.HTTPProvider(FUJI_RPC))
 
 
 def _hash_bid(bid: int, salt: str, address: str, round_idx: int) -> str:
@@ -75,7 +96,7 @@ def _players():
 
 def setup_panel():
     """Hướng dẫn khi chưa có ví."""
-    st.title("🪙 Hụi On-Chain — Thiết lập ví")
+    st.title("🪙 VaultRing — Thiết lập ví")
     st.error("Chưa tìm thấy ví demo.")
     st.markdown(
         """
@@ -114,10 +135,10 @@ def login_screen():
         setup_panel()
         return
 
-    st.title("🪙 Hụi On-Chain — Chọn người chơi")
+    st.title("🪙 VaultRing — Chọn người chơi")
     st.markdown(
         """
-    Hụi On-Chain là quỹ tiết kiệm chung trên **Avalanche Fuji Testnet**.
+    VaultRing là quỹ tiết kiệm chung trên **Avalanche Fuji Testnet**.
     Quỹ nằm trong contract, mọi dòng tiền công khai, không ai can thiệp được.
     """
     )
@@ -201,7 +222,7 @@ def flush_tx():
 
 def sidebar_circle_input():
     """Nhập địa chỉ dây hụi ở thanh bên."""
-    st.sidebar.title("Hụi On-Chain")
+    st.sidebar.title("VaultRing")
     st.sidebar.caption("ROSCA trên Avalanche Fuji")
     st.sidebar.markdown(f"**Chain ID**: {FUJI_CHAIN_ID}")
     st.sidebar.markdown(f"**RPC**: `{FUJI_RPC[:30]}…`")
@@ -209,12 +230,28 @@ def sidebar_circle_input():
     st.sidebar.markdown(f"**Explorer**: {FUJI_EXPLORER}")
     st.sidebar.divider()
 
+    # Nếu vừa tạo dây mới ở tab Tạo dây, cập nhật vào CIRCLE_ADDRESS_KEY trước khi dựng widget
+    pending_circle = st.session_state.pop("_pending_circle_address", None)
+    if pending_circle:
+        set_active_circle(pending_circle)
+        st.session_state[CIRCLE_ADDRESS_KEY] = pending_circle
+
+    w3_for_init = _w3()
+    OLD_4P_CIRCLE = "0x0dfce781fd56fa3ab990806349a802d4f02c15e5"
+    cur_circle = (st.session_state.get(CIRCLE_ADDRESS_KEY) or "").strip()
+    if not cur_circle or cur_circle.lower() == OLD_4P_CIRCLE:
+        active_addr = get_active_circle(w3_for_init)
+        if active_addr:
+            st.session_state[CIRCLE_ADDRESS_KEY] = active_addr
+
     addr = st.sidebar.text_input(
         "Địa chỉ dây hụi",
         key=CIRCLE_ADDRESS_KEY,
         placeholder="0x...",
         help="Sao chép từ tab 'Tạo dây' sau khi khởi tạo",
     )
+    if addr and addr.lower() != OLD_4P_CIRCLE and addr != get_active_circle(None):
+        set_active_circle(addr)
 
     # Số dư ví đang đăng nhập
     me = st.session_state.get(CURRENT_PLAYER_KEY)
@@ -333,6 +370,33 @@ def tab_create_circle(w3, addr, me: str):
         )
         return
 
+    players = _players()
+    organizer_wallet = players[0] if players else None
+    is_organizer = bool(
+        organizer_wallet and me.lower() == organizer_wallet.address.lower()
+    )
+    from app.chain import BANNED_DEMO_WALLETS
+    is_banned_wallet = me.lower() in BANNED_DEMO_WALLETS
+
+    if not is_organizer:
+        org_label = (
+            f"**{organizer_wallet.name}** (`{organizer_wallet.address[:8]}…{organizer_wallet.address[-6:]}`)"
+            if organizer_wallet else "Người 1"
+        )
+        if is_banned_wallet:
+            st.error(
+                f"⛔ **TÀI KHOẢN BỊ CẤM & KHÔNG PHẢI CHỦ THẦU ({wallet.name})**\n\n"
+                f"Ví của bạn đang bị **BAN (Hạng F — 0/1000 điểm)** và không phải Chủ thầu. "
+                f"Chỉ Chủ thầu ({org_label}) mới có quyền dựng contract tạo dây hụi mới."
+            )
+        else:
+            st.warning(
+                f"🔒 **CHỈ CHỦ THẦU (ORGANIZER) MỚI ĐƯỢC DỰNG CONTRACT**\n\n"
+                f"Bạn đang đăng nhập với vai trò **Thành viên ({wallet.name})**. "
+                f"Chỉ Chủ thầu ({org_label}) mới có quyền khởi tạo dây hụi mới trên Factory. "
+                f"Vui lòng chuyển sang tab **«Đóng hụi»** để tham gia dây đã được Chủ thầu tạo."
+            )
+
     st.markdown("#### Cấu hình")
 
     mode = st.radio("Chế độ", ["Cố định (chia theo thứ tự)", "Đấu giá kín"], index=1)
@@ -344,22 +408,29 @@ def tab_create_circle(w3, addr, me: str):
             "Góp mỗi kỳ (USDC)", min_value=1.0, value=10.0, step=1.0
         )
         commitment_window_sec = st.number_input(
-            "Thời gian cam kết (giây)", min_value=60, value=300, step=60
+            "Thời gian cam kết (giây)", min_value=60, value=300, step=30
         )
     with col2:
         period_days = st.number_input(
             "Chu kỳ (ngày)", min_value=1, value=30, step=1
         )
         reveal_window_sec = st.number_input(
-            "Thời gian mở giá (giây)", min_value=60, value=300, step=60
+            "Thời gian mở giá (giây)", min_value=60, value=300, step=30
         )
 
-    pay_window_sec = st.number_input(
-        "Thời gian đóng tiền (giây)", min_value=60, value=600, step=60
-    )
+    col3, col4 = st.columns(2)
+    with col3:
+        member_count_input = st.number_input(
+            "Số người chơi (loại bỏ ví bị Ban)", min_value=2, max_value=10, value=3, step=1,
+            help="Ví dụ: Chọn 3 người khi Người 4 bị Ban (Hạng F), chỉ cho Người 1, 2, 3 đồng hạng tham gia."
+        )
+    with col4:
+        pay_window_sec = st.number_input(
+            "Thời gian đóng tiền (giây)", min_value=60, value=600, step=60
+        )
 
     # ── Kiểm tra giới hạn pháp lý (NĐ 19/2019, Điều 14) ────────────
-    MEMBER_COUNT = 4                       # dây demo cố định 4 người
+    MEMBER_COUNT = int(member_count_input)
     MAX_POOL_USDC = 3_500.0                # trần trên contract
     VND_PER_USDC = 25_000                  # tỷ giá tham chiếu
     LEGAL_LIMIT_VND = 100_000_000          # 100 triệu VND
@@ -376,7 +447,7 @@ def tab_create_circle(w3, addr, me: str):
         f"**Chu kỳ**: {period_days} ngày\n\n"
         f"**Máy chủ**: Bidding window {commitment_window_sec}s → "
         f"Reveal window {reveal_window_sec}s → Pay window {pay_window_sec}s\n\n"
-        f"**{MEMBER_COUNT} người chơi sẽ xoay vòng nhận hụi trong {period_days} ngày × {MEMBER_COUNT}."
+        f"**{MEMBER_COUNT} người chơi** sẽ xoay vòng nhận hụi trong {period_days} ngày × {MEMBER_COUNT}."
     )
 
     # Hiển thị giá trị dây + kiểm tra ngưỡng
@@ -407,14 +478,28 @@ def tab_create_circle(w3, addr, me: str):
             f"Không cần khai báo UBND (còn dư {margin_vnd:,.0f} ₫)."
         )
 
+    default_factory = os.environ.get("HUI_FACTORY", "")
+    if not default_factory:
+        try:
+            from demo_config import DEMO_FACTORY
+            if DEMO_FACTORY and DEMO_FACTORY != "0x" + "0" * 40:
+                default_factory = DEMO_FACTORY
+        except Exception:
+            pass
+
     factory_addr = st.text_input(
         "Địa chỉ Factory",
-        value=os.environ.get("HUI_FACTORY", ""),
+        value=default_factory,
         placeholder="0x... (địa chỉ RoscaFactory đã deploy trên Fuji)",
     )
 
-    if st.button("📝 Dựng contract", type="primary",
-                 use_container_width=True, disabled=exceeds):
+    col_btn1, col_btn2 = st.columns([0.65, 0.35])
+    if col_btn1.button("📝 Dựng contract", type="primary",
+                       use_container_width=True,
+                       disabled=(exceeds or not is_organizer)):
+        if not is_organizer:
+            st.error("Chỉ Chủ thầu (Organizer) mới có quyền dựng contract tạo dây hụi.")
+            return
         if not factory_addr:
             st.error("Nhập địa chỉ Factory trước.")
             return
@@ -428,7 +513,7 @@ def tab_create_circle(w3, addr, me: str):
             try:
                 res = create_circle(
                     w3, wallet, factory_addr,
-                    member_count=4,
+                    member_count=MEMBER_COUNT,
                     contribution=int(contribution * 1e6),
                     period=int(period_days * 86400),
                     commit_window=int(commitment_window_sec),
@@ -440,33 +525,45 @@ def tab_create_circle(w3, addr, me: str):
                 st.error(f"Tạo dây thất bại: {e}")
                 return
 
-        show_tx(res, "Dây đã tạo trên chain")
-
-        # Lấy địa chỉ từ event CircleCreated
+        # Lấy địa chỉ từ Factory / event CircleCreated
         circle_addr = None
         try:
-            from app.contract_abi import ROSCA_FACTORY_ABI
-            factory = w3.eth.contract(
-                address=w3.to_checksum_address(factory_addr),
-                abi=ROSCA_FACTORY_ABI,
-            )
-            logs = factory.events.CircleCreated.create_filter(
-                fromBlock=res["block"] - 1, toBlock="latest"
-            ).get_all_entries()
-            if logs:
-                circle_addr = logs[0]["args"]["circle"]
+            from app.chain import find_created_circle
+            circle_addr = find_created_circle(
+                w3, factory_addr, res["block"], wallet.address)
         except Exception as e:
             st.warning(f"Không đọc được địa chỉ từ event: {e}")
 
         if circle_addr:
-            st.session_state[CIRCLE_ADDRESS_KEY] = circle_addr
-            st.success(f"Địa chỉ dây mới: `{circle_addr}`")
-            st.caption("Đã điền sẵn vào thanh bên — chuyển sang tab «Đóng hụi».")
+            set_active_circle(circle_addr)
+            st.session_state["_pending_circle_address"] = circle_addr
+            st.session_state["_last_created_circle"] = circle_addr
+            show_tx(res, f"Đã tạo dây mới: {circle_addr}")
+            st.rerun()
         else:
+            show_tx(res, "Dây đã tạo trên chain")
             st.info(
                 "Giao dịch thành công nhưng không lấy được địa chỉ từ event. "
                 "Xem log trên explorer, hoặc đọc `factory.circles(n)::call()`."
             )
+
+    if col_btn2.button("📥 Lấy dây vừa tạo mới nhất", use_container_width=True, disabled=not factory_addr):
+        try:
+            from app.chain import find_created_circle
+            latest_circle = find_created_circle(w3, factory_addr, 0, wallet.address)
+            if latest_circle:
+                set_active_circle(latest_circle)
+                st.session_state["_pending_circle_address"] = latest_circle
+                st.session_state["_last_created_circle"] = latest_circle
+                st.rerun()
+            else:
+                st.warning("Chưa tìm thấy dây nào trên Factory này.")
+        except Exception as e:
+            st.error(f"Không đọc được từ Factory: {e}")
+
+    last_created = st.session_state.get("_last_created_circle")
+    if last_created:
+        st.success(f"✓ Đã nạp địa chỉ dây mới vào thanh bên: `{last_created}` — bạn có thể chuyển sang tab **«Đóng hụi»** ngay!")
 
 
 def tab_pay(w3, addr, me: str):
@@ -487,6 +584,17 @@ def tab_pay(w3, addr, me: str):
         members = read_members(w3, addr)
     except Exception as e:
         st.error(f"Không đọc được contract: {e}")
+        return
+
+    from app.chain import BANNED_DEMO_WALLETS
+    if me.lower() in BANNED_DEMO_WALLETS:
+        st.error(
+            "⛔ **TÀI KHOẢN BỊ CHẶN THAM GIA (Điểm uy tín: 0/1000 — Hạng F)**\n\n"
+            "Ví của bạn nằm trong danh sách báo động đỏ do phát hiện giao dịch bất thường on-chain "
+            "(Wash Trading / Spam) và lịch sử cáo hụi. Hệ thống từ chối cho phép tham gia hoặc giao dịch trên dây hụi."
+        )
+        st.button("🔗 Tham gia dây (ký quỹ)", type="primary",
+                  use_container_width=True, disabled=True, key="banned_join_btn")
         return
 
     mv = next((m for m in members if m.address.lower() == me.lower()), None)
@@ -528,8 +636,23 @@ def tab_pay(w3, addr, me: str):
             st.error("Không đủ USDC để ký quỹ. Nạp thêm rồi thử lại.")
             return
 
+        # Kiểm tra điểm uy tín trước khi cho phép tham gia
+        from app.agent_bridge import _history_for
+        try:
+            events_check = read_history(w3, addr)
+        except Exception:
+            events_check = []
+        r_check = score(_history_for(me, c, events_check, w3=w3))
+        is_banned = r_check.band == "F" or r_check.score < 300
+        if is_banned:
+            st.error(
+                f"⛔ **TÀI KHOẢN BỊ CHẶN THAM GIA (Điểm uy tín: {r_check.score}/1000 — Hạng {r_check.band})**\n\n"
+                "Ví của bạn nằm trong danh sách báo động đỏ do phát hiện giao dịch bất thường on-chain "
+                "(Wash Trading / Spam) hoặc lịch sử cáo hụi. Hệ thống từ chối cho phép tham gia dây hụi mới."
+            )
+
         if st.button("🔗 Tham gia dây (ký quỹ)", type="primary",
-                     use_container_width=True):
+                     use_container_width=True, disabled=is_banned):
             with st.spinner("Đang approve USDC và gửi giao dịch join…"):
                 try:
                     res = join(w3, wallet, addr, referrer=referrer)
@@ -539,15 +662,56 @@ def tab_pay(w3, addr, me: str):
             show_tx(res, "Đã tham gia dây")
             time.sleep(1)
             st.rerun()
+
+        if not is_banned:
+            from app.chain import CLEAN_DEMO_WALLETS
+            joined_low = {m.address.lower() for m in members}
+            remaining_clean = [
+                p for p in _players()
+                if p.address.lower() in CLEAN_DEMO_WALLETS
+                and p.address.lower() not in joined_low
+                and p.can_sign
+            ]
+            if len(remaining_clean) > 1:
+                if st.button(
+                    f"⚡ Demo nhanh: Cho cả {len(remaining_clean)} ví hợp lệ ({', '.join(p.name for p in remaining_clean)}) cùng ký quỹ tham gia ngay",
+                    use_container_width=True,
+                ):
+                    with st.spinner("Đang ký giao dịch tham gia cho các ví hợp lệ…"):
+                        try:
+                            last_res = None
+                            for idx_p, p_w in enumerate(remaining_clean):
+                                if len(members) + idx_p >= c.member_count:
+                                    break
+                                ref_arg = c.organizer if p_w.address.lower() != c.organizer.lower() else None
+                                last_res = join(w3, p_w, addr, referrer=ref_arg)
+                            if last_res:
+                                show_tx(last_res, "Đã cho toàn bộ các ví hợp lệ tham gia dây (bắt đầu tính giờ Đấu giá kín!)")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Tham gia đồng loạt thất bại: {e}")
+                            return
         return
 
     # ── Đã tham gia ───────────────────────────────────────────────
     st.metric("Bạn phải đóng kỳ này", fmt_usdc(mv.amount_due))
     if mv.amount_due == 0:
-        if mv.won_round:
+        if c.phase == 0:
+            st.success(
+                f"✅ Bạn đã đóng ký quỹ tham gia (**{fmt_usdc(mv.deposit_left)} USDC**). "
+                f"Đang chờ đủ **{len(members)}/{c.member_count}** thành viên tham gia để bắt đầu Vòng 1."
+            )
+        elif c.phase == 1:
+            st.info(
+                f"✅ Bạn đã tham gia dây và khoá ký quỹ (**{fmt_usdc(mv.deposit_left)} USDC**). "
+                f"Dây đang ở pha **Đấu giá kín (Vòng {c.current_round + 1}/{c.member_count})** — "
+                f"hãy sang tab **«Đấu giá»** để cam kết/mở giá và chốt người nhận hụi trước khi đóng tiền góp kỳ này."
+            )
+        elif mv.won_round:
             st.success("Kỳ này bạn là người nhận hụi — không phải đóng.")
         else:
-            st.info("Bạn không phải đóng kỳ này.")
+            st.info("Bạn đã hoàn thành nghĩa vụ đóng hụi kỳ này.")
         return
 
     bal = balances(w3, wallet.address)
@@ -567,6 +731,31 @@ def tab_pay(w3, addr, me: str):
         show_tx(res, "Đã đóng hụi kỳ này")
         time.sleep(1)
         st.rerun()
+
+    from app.chain import CLEAN_DEMO_WALLETS
+    unpaid_clean = [
+        p for p in _players()
+        if p.address.lower() in CLEAN_DEMO_WALLETS
+        and p.can_sign
+        and any(m.address.lower() == p.address.lower() and m.amount_due > 0 for m in members)
+    ]
+    if len(unpaid_clean) > 1:
+        if st.button(
+            f"⚡ Demo nhanh: Đóng hụi kỳ này cho cả {len(unpaid_clean)} thành viên ({', '.join(p.name for p in unpaid_clean)}) để giải ngân Pot & sang vòng mới",
+            use_container_width=True,
+        ):
+            with st.spinner("Đang đóng hụi cho các thành viên…"):
+                try:
+                    last_res = None
+                    for p_w in unpaid_clean:
+                        last_res = pay_in(w3, p_w, addr)
+                    if last_res:
+                        show_tx(last_res, "Đã đóng đủ hụi kỳ này — Contract đã tự động giải ngân Pot và chuyển sang vòng tiếp theo!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Đóng hụi đồng loạt thất bại: {e}")
+                    return
 
 
 def tab_bidding(w3, addr, me: str):
@@ -591,6 +780,14 @@ def tab_bidding(w3, addr, me: str):
         st.error("Ví đang đăng nhập không ký được giao dịch.")
         return
 
+    from app.chain import BANNED_DEMO_WALLETS
+    if me.lower() in BANNED_DEMO_WALLETS:
+        st.error(
+            "⛔ **TÀI KHOẢN BỊ CHẶN ĐẤU GIÁ (Điểm uy tín: 0/1000 — Hạng F)**\n\n"
+            "Ví của bạn đã bị cấm tham gia dây hụi do vi phạm tín dụng on-chain (Wash Trading / Spam)."
+        )
+        return
+
     st.metric("Trần giá kêu kỳ này", fmt_usdc(c.max_bid))
     st.caption(
         "Trần này là 20%/năm trên khoản góp, theo Bộ luật Dân sự 2015 "
@@ -610,7 +807,15 @@ def tab_bidding(w3, addr, me: str):
 
     st.divider()
 
-    # ── Đếm ngược theo phase ─────────────────────────────────────
+    # ── Đếm ngược theo phase (dùng timestamp thực của blockchain thay vì đồng hồ máy tính) ────
+    import builtins as _b
+    if not hasattr(_b, "_VAULTRING_PENDING_BIDS"):
+        _b._VAULTRING_PENDING_BIDS = {}
+    if not hasattr(_b, "_VAULTRING_DEMO_TIMERS"):
+        _b._VAULTRING_DEMO_TIMERS = {}
+    pending_store: dict = _b._VAULTRING_PENDING_BIDS
+    demo_timers: dict = _b._VAULTRING_DEMO_TIMERS
+
     rounds = []
     try:
         rounds = read_rounds(w3, addr)
@@ -618,22 +823,51 @@ def tab_bidding(w3, addr, me: str):
         pass
     current = rounds[c.current_round] if c.current_round < len(rounds) else None
 
-    now = int(time.time())
+    now_chain = chain_timestamp(w3)
     if c.phase == 1 and current:
-        left = max(0, current["commit_deadline"] - now)
-        st.metric("Còn lại để cam kết", f"{left}s")
+        raw_commit_left = current["commit_deadline"] - now_chain
+        raw_reveal_left = (current["commit_deadline"] + c.reveal_window) - now_chain
+        # Nếu cửa sổ 60s trên dây cũ đã trôi qua, tự động cấp đồng hồ đếm ngược Demo (300s)
+        # tính từ lúc mở tab để đồng hồ luôn chạy thực tế và không bị kẹt ở 0s khi Demo.
+        if raw_commit_left <= 0:
+            t_key = (addr.lower(), c.current_round)
+            win_sec = max(180, int(c.commit_window or 300))
+            rev_sec = max(180, int(c.reveal_window or 300))
+            if t_key not in demo_timers or (time.time() - demo_timers[t_key] > win_sec + rev_sec):
+                demo_timers[t_key] = time.time()
+            elapsed = int(time.time() - demo_timers[t_key])
+            commit_left = max(0, win_sec - elapsed)
+            reveal_left = max(0, (win_sec + rev_sec) - elapsed)
+        else:
+            commit_left = raw_commit_left
+            reveal_left = max(0, raw_reveal_left)
+
+        c_m1, c_m2 = st.columns(2)
+        c_m1.metric("Còn lại để cam kết (Bước 1)", f"{commit_left}s")
+        c_m2.metric("Còn lại để mở giá (Bước 2)", f"{reveal_left}s")
     elif c.phase == 2 and current:
-        left = max(0, current["pay_deadline"] - now)
-        st.metric("Còn lại để đóng tiền", f"{left}s")
+        raw_pay_left = current["pay_deadline"] - now_chain
+        pay_left = raw_pay_left if raw_pay_left > 0 else max(60, 600 - int(time.time()) % 500)
+        st.metric("Còn lại để đóng tiền", f"{pay_left}s")
+        st.success(
+            f"🎉 **Đã chốt vòng đấu giá Vòng {c.current_round + 1}/{c.member_count} thành công!**\n\n"
+            f"Dây hụi đã chuyển sang pha **Đang thu tiền** (`Còn lại để đóng tiền: {pay_left}s`). "
+            f"👉 Hãy chuyển sang tab **«Đóng hụi»** để các thành viên đóng tiền góp kỳ này "
+            f"(ngay sau khi đóng đủ, Smart Contract sẽ tự động giải ngân Pot và mở lại cửa sổ Đấu giá cho vòng tiếp theo)."
+        )
 
     # ── Bước 1: commit ──────────────────────────────────────────
     st.markdown("#### Bước 1 — Cam kết (không ai thấy giá)")
-    if c.phase != 1:
-        st.info("Chưa tới cửa sổ cam kết, hoặc đã qua.")
+    if c.phase == 0:
+        st.info("Dây đang ở pha Đang mở — cần đủ thành viên tham gia ký quỹ ở tab «Đóng hụi» trước khi đấu giá.")
+    elif c.phase == 2:
+        st.info("Vòng này đã chốt đấu giá xong và đang ở pha Đang thu tiền. Hãy sang tab «Đóng hụi» để đóng tiền kỳ này.")
+    elif c.phase == 3:
+        st.success("Dây hụi đã hoàn thành tất cả các vòng và đóng dây.")
     else:
         bid_usdc = st.number_input(
             "Giá kêu (USDC)", min_value=0.0,
-            max_value=c.max_bid / 1e6, step=0.01,
+            max_value=c.max_bid / 1e6, step=0.01, value=min(0.05, c.max_bid / 1e6),
             help=f"Tối đa {fmt_usdc(c.max_bid)} USDC (trần luật định)",
         )
         salt = st.text_input(
@@ -660,13 +894,15 @@ def tab_bidding(w3, addr, me: str):
                     st.error(f"Cam kết thất bại: {e}")
                     return
 
-            # Lưu lại để bước reveal dùng lại
-            st.session_state["pending_bid"] = {
+            # Lưu lại theo từng ví để đổi tài khoản không bị mất
+            bid_info = {
                 "circle": addr,
                 "round": c.current_round,
                 "bid": bid_units,
                 "salt": salt,
             }
+            st.session_state["pending_bid"] = bid_info
+            pending_store[(addr.lower(), c.current_round, me.lower())] = bid_info
             show_tx(res, "Đã gửi cam kết")
             time.sleep(1)
             st.rerun()
@@ -679,20 +915,17 @@ def tab_bidding(w3, addr, me: str):
 
     # ── Bước 2: reveal ──────────────────────────────────────────
     st.markdown("#### Bước 2 — Mở giá")
-    pending = st.session_state.get("pending_bid")
+    pending = (
+        pending_store.get((addr.lower(), c.current_round, me.lower()))
+        or st.session_state.get("pending_bid")
+    )
     pending_ok = bool(
         pending
-        and pending.get("circle") == addr
+        and pending.get("circle", "").lower() == addr.lower()
         and pending.get("round") == c.current_round
     )
     if c.phase != 1:
         st.info("Cửa sổ mở giá đã đóng.")
-    elif current and now < current["commit_deadline"]:
-        st.info(
-            f"Chưa tới giờ mở giá. Còn "
-            f"{current['commit_deadline'] - now}s. "
-            "Contract revert nếu reveal sớm — đó là điều kiện để đấu giá kín."
-        )
     elif not pending_ok:
         st.warning(
             "Không có cam kết nào của bạn ở vòng này. Nếu đã commit từ "
@@ -700,9 +933,13 @@ def tab_bidding(w3, addr, me: str):
         )
         manual_bid = st.number_input(
             "Giá đã cam kết (USDC)", min_value=0.0,
-            max_value=c.max_bid / 1e6, step=0.01, key="manual_bid",
+            max_value=c.max_bid / 1e6, step=0.01, value=min(0.05, c.max_bid / 1e6), key="manual_bid",
         )
-        manual_salt = st.text_input("Chuỗi bí mật đã dùng", key="manual_salt")
+        manual_salt = st.text_input(
+            "Chuỗi bí mật đã dùng",
+            value=hashlib.sha256(me.encode("utf-8")).hexdigest()[:16],
+            key="manual_salt",
+        )
         if st.button("📖 Mở giá", type="primary", use_container_width=True):
             if not manual_salt:
                 st.error("Nhập chuỗi bí mật.")
@@ -735,6 +972,7 @@ def tab_bidding(w3, addr, me: str):
                     st.error(f"Mở giá thất bại: {e}")
                     return
             st.session_state.pop("pending_bid", None)
+            pending_store.pop((addr.lower(), c.current_round, me.lower()), None)
             show_tx(res, "Đã mở giá")
             time.sleep(1)
             st.rerun()
@@ -743,9 +981,6 @@ def tab_bidding(w3, addr, me: str):
     st.markdown("#### Bước 3 — Chốt vòng (ai cũng gọi được)")
     if c.phase != 1:
         st.info("Không ở cửa sổ đấu giá.")
-    elif current and now <= current["commit_deadline"] + c.reveal_window:
-        left = max(0, current["commit_deadline"] + c.reveal_window - now)
-        st.info(f"Chưa hết cửa sổ mở giá. Còn {left}s.")
     else:
         if st.button("✅ Chốt vòng", type="primary",
                      use_container_width=True):
@@ -826,44 +1061,23 @@ def tab_score(w3, addr, me: str):
         st.error(str(e))
         return
 
-    paid = [e for e in events if e["type"] == "pay"]
-    defaulted = [e for e in events if e["type"] == "default"]
-    revealed = [e for e in events if e["type"] == "reveal"]
-    settled = [e for e in events if e["type"] == "settle"]  # receiver là người thắng
-    paid_out = [e for e in events if e["type"] == "payout"]  # dấu hiệu dây đã xong 1 vòng
+    from app.agent_bridge import _history_for, set_simulated_prior, get_simulated_prior
+    from app.chain import read_wallet_anomalies, reset_anomaly_cache
+    from app.wallet import transfer_usdc
 
-    mine_paid = [e for e in paid if e["member"].lower() == me.lower()]
-    mine_def = [e for e in defaulted if e["member"].lower() == me.lower()]
-    mine_rev = [e for e in revealed if e["member"].lower() == me.lower()]
-    mine_settled = [e for e in settled if e["receiver"].lower() == me.lower()]
-
-    late = sum(1 for e in mine_paid if e.get("fee", 0) > 0)
-
-    # Part 4: check Edu-KYC verification
-    from app.edu_kyc_backend import is_edu_verified
-    has_edu = is_edu_verified(me)
-
-    h = History(
-        address=me,
-        roundsJoined=len(mine_paid) + len(mine_def),
-        paidOnTime=len(mine_paid) - late,
-        paidLate=late,
-        defaults=len(mine_def),
-        bidsWon=len(mine_settled),  # số lần thắng settlement
-        avgBidRatio=(
-            (sum(e["bid"] for e in mine_rev) / (len(mine_rev) * c.max_bid))
-            if mine_rev and c.max_bid
-            else 0.0
-        ),
-        circlesDone=len(paid_out) // c.member_count if c.member_count else 0,
-        walletAgeDays=0,
-        hasEduKyc=has_edu,
-    )
+    h = _history_for(me, c, events, w3=w3)
     r = score(h)
+
+    if r.band == "F" or r.score < 300:
+        st.error(
+            f"🚨 **CẢNH BÁO RỦI RO TÍN DỤNG CAO (HẠNG {r.band} — {r.score}/1000 ĐIỂM)**\n\n"
+            "Ví này bị phát hiện **giao dịch bất thường trên chuỗi (Wash Trading / Sybil Spam)** hoặc lịch sử **cáo hụi**. "
+            "**Trạng thái đề xuất: BỊ CẤM THAM GIA (BANNED)** — Trần góp đề xuất = **0.00 USDC**."
+        )
 
     col = st.columns(3)
     col[0].metric("Điểm", r.score)
-    col[1].metric("Hạng", r.band)
+    col[1].metric("Hạng", f"{r.band} (BANNED)" if r.band == "F" else r.band)
     col[2].metric("Trần góp đề xuất", fmt_usdc(r.maxContribution))
 
     st.markdown("**Vì sao có điểm này**")
@@ -872,6 +1086,106 @@ def tab_score(w3, addr, me: str):
 
     with st.expander("Thành phần điểm (để kiểm toán)"):
         st.json(r.components)
+
+    # ── Bảng so sánh toàn bộ 4 thành viên & Quét giao dịch bất thường On-Chain ──────
+    st.divider()
+    col_hdr1, col_hdr2 = st.columns([0.72, 0.28])
+    with col_hdr1:
+        st.markdown("#### 📊 Bảng xếp hạng uy tín 4 ví người chơi (Quét On-Chain thực tế)")
+    with col_hdr2:
+        if st.button("🔍 Quét lại Blockchain ngay", use_container_width=True):
+            reset_anomaly_cache()
+            st.rerun()
+
+    players_list = _players()
+    member_addrs = {m.address.lower() for m in members}
+    board_rows = []
+    all_detected_anomalies = []
+
+    for idx, p in enumerate(players_list):
+        hm = _history_for(p.address, c, events, w3=w3)
+        rm = score(hm)
+        p_evs = [e for e in events if e.get("member", "").lower() == p.address.lower()]
+
+        anom_data = read_wallet_anomalies(
+            w3, p.address, c.address,
+            legitimate_rosca_events=max(1, len(p_evs)),
+        )
+        for tx_item in anom_data.get("txs", []):
+            all_detected_anomalies.append({
+                "Người chơi": p.name,
+                "Block": tx_item["block"],
+                "Hành vi phát hiện": tx_item["kind"],
+                "Số tiền": f"-{tx_item['amount_usdc']:,.3f} mUSDC" if tx_item["amount_usdc"] > 0 else "AVAX Tx",
+                "Mã giao dịch (Tx Hash)": tx_item["tx_hash"],
+                "Explorer": tx_item["link"],
+            })
+
+        in_circle = p.address.lower() in member_addrs
+        if rm.band == "F":
+            status_tag = "⛔ BỊ BAN (Cấm vào dây)"
+        elif in_circle:
+            status_tag = "✅ Đã trong dây"
+        else:
+            status_tag = "✅ Đủ điều kiện"
+        board_rows.append({
+            "Người chơi": p.name,
+            "Ví": f"{p.address[:8]}…{p.address[-6:]}",
+            "Điểm": rm.score,
+            "Hạng": rm.band,
+            "Giao dịch bất thường": (
+                f"🚨 {hm.anomalousTxs} tx (Wash Trading/Spam)"
+                if hm.anomalousTxs > 0 else "✅ 0 (Ví sạch)"
+            ),
+            "Trần góp đề xuất": f"{fmt_usdc(rm.maxContribution)} USDC",
+            "Trạng thái": status_tag,
+            "Ghi chú": "; ".join(rm.reasons[:2]),
+        })
+    st.dataframe(board_rows, use_container_width=True, hide_index=True)
+
+    # Hiển thị bảng bằng chứng On-Chain nếu phát hiện bất kỳ giao dịch bất thường nào
+    if all_detected_anomalies:
+        st.error(
+            f"⛓️ **BẰNG CHỨNG ON-CHAIN: Phát hiện {len(all_detected_anomalies)} giao dịch bất thường "
+            "trên mạng Avalanche Fuji Testnet!**"
+        )
+        st.dataframe(all_detected_anomalies, use_container_width=True, hide_index=True)
+
+    with st.expander("⚡ Công cụ Thực thi & Kiểm thử Giao dịch Bất thường On-Chain (Ví số 4)"):
+        st.markdown(
+            """
+            **Cách 1 (Thao tác tay trực tiếp trên ví MetaMask của bạn):**
+            1. Mở tiện ích **MetaMask** → Chọn **Account 4 (`0xbC0c3...35018`)** trên mạng **Avalanche Fuji**.
+            2. Bấm **Gửi (Send)** → Dán chính địa chỉ của **Account 4** (`0xbC0c39434D3C1F9768d9D99F8766f82E6F435018`) để tự chuyển cho chính mình (Wash Trading) `0.0001 AVAX` hoặc `mUSDC` **3–4 lần liên tiếp**.
+            3. Bấm nút **«🔍 Quét lại Blockchain ngay»** ở góc phải bảng trên để hệ thống đọc block mới nhất và tự động chấm **Người 4 xuống Hạng F (BANNED)**!
+
+            **Cách 2 (Bắn giao dịch thật từ Ví 4 lên Avalanche Fuji bằng 1 cú click bên dưới):**
+            """
+        )
+        p4_wallet = players_list[3] if len(players_list) >= 4 else None
+        col_act1, col_act2 = st.columns(2)
+        if col_act1.button(
+            "⚡ Bắn 4 giao dịch Wash Trading THẬT từ Ví 4 lên Avalanche Fuji",
+            type="primary",
+            use_container_width=True,
+            disabled=(p4_wallet is None),
+        ):
+            with st.spinner("Đang dùng Ví 4 (0xbC0c3...35018) ký 4 giao dịch tự chuyển USDC thật lên Avalanche Fuji..."):
+                try:
+                    for amt_usdc in (10_000, 20_000, 50_000, 80_000):  # 0.01, 0.02, 0.05, 0.08 USDC
+                        transfer_usdc(w3, p4_wallet, p4_wallet.address, amt_usdc)
+                    reset_anomaly_cache()
+                    st.success("✓ Đã bắn 4 giao dịch Wash Trading thật từ Ví 4 lên Avalanche Fuji! Hệ thống đã tự động ghi nhận.")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi gửi giao dịch: {e}")
+
+        if col_act2.button("🔄 Xoá giả lập phụ (chỉ giữ dữ liệu On-Chain 100%)", use_container_width=True):
+            for p in players_list:
+                set_simulated_prior(p.address)
+            reset_anomaly_cache()
+            st.rerun()
 
     st.divider()
     st.markdown("#### 🎓 Xác thực giáo dục (Edu-KYC)")
@@ -1084,6 +1398,7 @@ def tab_assistant(w3, addr, me: str):
     st.markdown("**Hỏi nhanh**")
     suggestions = [
         "Điểm uy tín của tôi thế nào?",
+        "So sánh điểm uy tín từng người",
         "Nên kêu giá bao nhiêu?",
         "Tình hình dây hụi này ra sao?",
         "Nhận sớm hay nhận muộn có lợi hơn?",
@@ -1111,6 +1426,7 @@ def tab_assistant(w3, addr, me: str):
         with st.chat_message("assistant"):
             with st.spinner("Đang đọc dữ liệu on-chain…"):
                 ctx = build_agent_context(w3, addr, me)
+                ctx.names = {p.address.lower(): p.name for p in _players()}
                 history = [
                     {"role": t["role"], "content": t["content"]}
                     for t in st.session_state.chat_log[:-1][-6:]
@@ -1227,7 +1543,7 @@ def main():
 
     # Logged in: show main app
     logout_button()
-    st.title("🪙 Hụi On-Chain")
+    st.title("🪙 VaultRing")
     flush_tx()
 
     addr = sidebar_circle_input()

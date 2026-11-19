@@ -47,6 +47,7 @@ class History:
     circlesDone: int = 0
     walletAgeDays: int = 0
     hasEduKyc: bool = False       # bonus: xác thực thẻ sinh viên
+    anomalousTxs: int = 0         # số giao dịch bất thường phát hiện on-chain (Wash Trading / Spam)
 
     @property
     def totalPayments(self) -> int:
@@ -153,6 +154,15 @@ def score(history: History, base_unit: int = 1_000_000) -> ScoreResult:
         raw -= penalty
         reasons.append(f"trừ {penalty} điểm do cáo")
 
+    # ── Giao dịch bất thường On-Chain (Wash Trading / Sybil Spam) ──
+    if history.anomalousTxs > 0:
+        anom_penalty = min(500, 150 * history.anomalousTxs)
+        raw -= anom_penalty
+        reasons.append(
+            f"🚨 phát hiện {history.anomalousTxs} giao dịch bất thường on-chain "
+            f"(Wash Trading / Spam) → trừ {anom_penalty} điểm"
+        )
+
     # ── Edu-KYC: cộng nhẹ, không phải cửa sau ──────────────────────
     if history.hasEduKyc:
         raw += 30
@@ -171,8 +181,11 @@ def score(history: History, base_unit: int = 1_000_000) -> ScoreResult:
         band, mult = "C", 2
     elif s >= 450:
         band, mult = "D", 1
-    else:
+    elif s >= 300:
         band, mult = "E", 0.5
+    else:
+        band, mult = "F", 0
+        reasons.append("⛔ MỨC BÁO ĐỘNG ĐỎ: Khuyến nghị từ chối / cấm tham gia dây mới (Banned)")
 
     return ScoreResult(
         score=s,

@@ -816,7 +816,7 @@ App:
   ⏳ test credit score +30
 
 Demo:
-  ⏳ record 3-5 min video
+  ⏳ record 2-3 min video
   ⏳ test end-to-end flow
   ⏳ verify all parts working
 
@@ -838,4 +838,3 @@ Platform:
 ```
 
 ---
-

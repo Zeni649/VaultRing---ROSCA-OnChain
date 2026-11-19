@@ -31,7 +31,7 @@ class TestCreditScore(unittest.TestCase):
                     circlesDone=0, walletAgeDays=100)
         r = score(h)
         self.assertLess(r.score, 300)
-        self.assertIn(r.band, ("D", "E"))
+        self.assertIn(r.band, ("D", "E", "F"))
 
     def test_one_default_costs_heavily(self):
         """Một lần cáo phải nói nhiều hơn nhiều kỳ trả đúng."""

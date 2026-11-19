@@ -90,10 +90,10 @@ def create_circle_demo(w3, players, factory_addr):
         # Tìm address dây mới từ event
         time.sleep(5)
         try:
-            logs = factory.events.CircleCreated.create_filter(
-                fromBlock=res["block"] - 1, toBlock="latest").get_all_entries()
-            if logs:
-                circle = logs[0]["args"]["circle"]
+            from app.chain import find_created_circle
+            circle = find_created_circle(
+                w3, factory_addr, res["block"], organizer.address)
+            if circle:
                 print(f"\n🎯 Dây mới: {circle}")
                 return circle
         except Exception as e:

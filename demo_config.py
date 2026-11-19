@@ -14,9 +14,9 @@ Các hằng số này định nghĩa tham số của dây hụi demo:
 # Địa chỉ Factory và Circle trên Fuji
 # ──────────────────────────────────────────────────────────────────
 # Thay bằng địa chỉ thật sau khi deploy
-DEMO_FACTORY = "0x" + "0" * 40  # TODO: deploy RoscaFactory lên Fuji
-DEMO_CIRCLE = "0x" + "0" * 40   # TODO: hoặc để trống, script sẽ tạo mới
-DEMO_ADAPTER = "0x" + "0" * 40  # TODO: deploy YieldAdapter hoặc MockYieldAdapter lên Fuji
+DEMO_FACTORY = "0x16b1797Bc96CdA5911F31516f62c1B2a86b395ed"
+DEMO_CIRCLE = "0x2B5fcCef6BEEdFF669Bfdf61208B4460dC17b6fb"
+DEMO_ADAPTER = "0xeCf9CF3d5A2f0d831EA0d193dE8b8D01ece929B5"
 
 # ──────────────────────────────────────────────────────────────────
 # Tham số dây hụi

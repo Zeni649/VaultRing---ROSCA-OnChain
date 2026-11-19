@@ -32,7 +32,7 @@ from ai.credit_score import History
 
 MAX_STEPS = 3
 
-SYSTEM_PROMPT = """Bạn là trợ lý tài chính cho "Hụi On-Chain" — một dây hụi (ROSCA) \
+SYSTEM_PROMPT = """Bạn là trợ lý tài chính cho "VaultRing" — một dây hụi on-chain (ROSCA) \
 chạy trên hợp đồng thông minh ở Avalanche, dùng USDC.
 
 NGUYÊN TẮC BẮT BUỘC:
@@ -146,8 +146,11 @@ class AgentContext:
         received: Optional[List[str]] = None,
         paid_this_round: Optional[List[str]] = None,
         penalty_pool: int = 0,
+        histories: Optional[Dict[str, History]] = None,
     ):
         self.history = history
+        self.histories = histories or {}   # địa chỉ (lowercase) -> History
+        self.names: Dict[str, str] = {}    # địa chỉ -> tên hiển thị ("Người 2")
         self.member_count = member_count
         self.contribution = contribution
         self.period = period
@@ -162,6 +165,14 @@ def run_tool(name: str, args: Dict[str, Any], ctx: AgentContext) -> Dict[str, An
     """Chạy một tool theo tên. Trả về dict, không bao giờ raise."""
     try:
         if name == "explain_credit_score":
+            # Nếu hỏi về ví khác trong dây thì chấm ví đó, không phải ví đang đăng nhập.
+            want = str(args.get("address", "")).strip().lower()
+            if want and want in ctx.histories:
+                return tools.explain_credit_score(ctx.histories[want])
+            if want and ctx.histories and not (
+                    ctx.history and ctx.history.address.lower() == want):
+                return {"loi": f"ví {args.get('address')} không phải thành "
+                               "viên của dây này nên không có dữ liệu"}
             if ctx.history is None:
                 return {"loi": "chưa có dữ liệu ví"}
             return tools.explain_credit_score(ctx.history)
@@ -427,6 +438,25 @@ def _compose_from_tools(results: List[Dict[str, Any]]) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _score_targets(question: str, ctx: AgentContext) -> List[str]:
+    """
+    Xác định câu hỏi về điểm uy tín của ai: địa chỉ 0x…, tên ("Người 2"),
+    hoặc "tất cả / từng người / mọi người". Rỗng = ví đang đăng nhập.
+    """
+    q = question.lower()
+    if any(k in q for k in ("tất cả", "từng người", "mọi người",
+                            "các thành viên", "cả nhóm", "so sánh")):
+        return list(ctx.histories.keys())
+
+    out = []
+    for m in re.finditer(r"0x[0-9a-fA-F]{40}", question):
+        out.append(m.group(0).lower())
+    for addr, name in ctx.names.items():
+        if name.lower() in q:
+            out.append(addr.lower())
+    return list(dict.fromkeys(out))
+
+
 def _deterministic_answer(question: str, ctx: AgentContext) -> str:
     """
     Khi không có LLM: vẫn trả lời hữu ích bằng tool, không có văn phong.
@@ -445,7 +475,18 @@ def _deterministic_answer(question: str, ctx: AgentContext) -> str:
     if not picks:
         picks = ["circle_status", "explain_credit_score"]
 
-    results = [{"tool": n, "ketQua": run_tool(n, {}, ctx)} for n in picks]
+    results = []
+    for n in picks:
+        if n == "explain_credit_score":
+            targets = _score_targets(question, ctx) or [""]
+            for t in targets:
+                res = run_tool(n, {"address": t}, ctx)
+                label = ctx.names.get(t, t[:8] + "…") if t else ""
+                if label and "diem" in res:
+                    res = dict(res, lyDo=[f"({label})"] + list(res.get("lyDo", [])))
+                results.append({"tool": n, "ketQua": res})
+        else:
+            results.append({"tool": n, "ketQua": run_tool(n, {}, ctx)})
     body = _compose_from_tools(results)
     return (
         "_(Chế độ không có AI: đây là số liệu trực tiếp từ hợp đồng.)_\n\n"
