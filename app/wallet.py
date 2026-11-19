@@ -87,13 +87,38 @@ def load_players() -> list[DemoWallet]:
                 continue
 
     if not out:
+        names_default = ["Alice", "Bob", "Carol", "Dave"]
         for i in range(1, 5):
             key = (os.environ.get(f"HUI_PK_{i}") or "").strip() or None
+            if not key:
+                try:
+                    import streamlit as _st
+                    key = str(_st.secrets.get(f"HUI_PK_{i}", "")).strip() or None
+                except Exception:
+                    key = None
             if not key:
                 continue
             try:
                 out.append(DemoWallet(
-                    name=f"Người {i}",
+                    name=names_default[i - 1],
+                    address=_address_of(key),
+                    key=key,
+                ))
+            except Exception:
+                continue
+
+    # Fallback cho bản Live App trên Streamlit Cloud (ví Fuji Testnet chỉ chứa mUSDC/AVAX thử nghiệm)
+    if not out:
+        _TESTNET_FALLBACK = [
+            ("Alice", "9f757ea3df2caf9b2b1c9f4ebd1ee9704c8d81d585a13edc1fa0d38d5f6fd92e"),
+            ("Bob", "c486b2ff77593b5127eeacc43a015a560cc44d3cf1132c1d8718a170c5a630ae"),
+            ("Carol", "6349f6df10e571f293efbed1d9f446457730776f2b337072875d1e6dd253714e"),
+            ("Dave", "d32ac68c89cbae1806f751dc7c63989a503c939c75a490f4b549c69c887b3740"),
+        ]
+        for name, key in _TESTNET_FALLBACK:
+            try:
+                out.append(DemoWallet(
+                    name=name,
                     address=_address_of(key),
                     key=key,
                 ))
